@@ -7,6 +7,7 @@ library(runner)
 library(glue)
 library(roll)
 library(PerformanceAnalytics)
+library(finutils)
 
 
 # SET UP ------------------------------------------------------------------
@@ -19,68 +20,23 @@ setCalendar("UnitedStates/NYSE")
 
 
 # PRICE DATA --------------------------------------------------------------
-# Import QC daily data
-prices = fread("F:/lean/data/stocks_daily.csv")
-setnames(prices, gsub(" ", "_", c(tolower(colnames(prices)))))
-
-# Remove duplicates
-prices = unique(prices, by = c("symbol", "date"))
-
-# Remove duplicates - there are same for different symbols (eg. phun and phun.1)
-dups = prices[, .(symbol , n = .N),
-              by = .(date, open, high, low, close, volume, adj_close,
-                     symbol_first = substr(symbol, 1, 1))]
-dups = dups[n > 1]
-dups[, symbol_short := gsub("\\.\\d$", "", symbol)]
-symbols_remove = dups[, .(symbol, n = .N),
-                      by = .(date, open, high, low, close, volume, adj_close,
-                             symbol_short)]
-symbols_remove[n >= 2, unique(symbol)]
-symbols_remove = symbols_remove[n >= 2, unique(symbol)]
-symbols_remove = symbols_remove[grepl("\\.", symbols_remove)]
-prices = prices[symbol %notin% symbols_remove]
-
-# Set key
-setkey(prices, symbol)
-
-# Adjust all columns
-prices[, adj_rate := adj_close / close]
-prices[, let(
-  open = open*adj_rate,
-  high = high*adj_rate,
-  low = low*adj_rate
-)]
-setnames(prices, "close", "close_raw")
-setnames(prices, "adj_close", "close")
-prices[, let(adj_rate = NULL)]
-setcolorder(prices, c("symbol", "date", "open", "high", "low", "close", "volume"))
-
-# Remove observations where open, high, low, close columns are below 1e-008
-# This step is opional, we need it if we will use finfeatures package
-prices = prices[open > 1e-008 & high > 1e-008 & low > 1e-008 & close > 1e-008]
-
-# Remove missing values
-prices = na.omit(prices)
-
-# Keep only symbol with at least 2 years of data
-# This step is optional
-symbol_keep = prices[, .N, symbol][N >= 2 * 252, symbol]
-prices = prices[symbol %chin% symbol_keep]
-
-# Sort
-setorder(prices, symbol, date)
+# Import daily data
+prices = qc_daily(
+  file_path = "F:/lean/data/stocks_daily.csv",
+  min_obs = 2 * 252,
+  price_threshold = 1e-008,
+  add_dv_rank = TRUE
+)
+key(prices)
 
 # save SPY for later and keep only events symbols
-spy = prices[symbol == "spy"]
+spy = prices["spy"]
 
 # free memory
 gc()
 
 
 # PREPARE DATA FOR SEASONALITY ANALYSIS -----------------------------------
-# Calculate return
-prices[, returns := close / shift(close) - 1, by = symbol]
-
 # Remove outliers
 nrow(prices[returns > 1]) / nrow(prices)
 prices = prices[returns < 1] # TODO:: better outlier detection mechanism. For now, remove daily returns above 100%
@@ -101,7 +57,7 @@ prices[, return_week_std := return_week / std_roll]
 prices[, return_week2_std := return_week2 / std_roll]
 
 # define frequency unit
-prices[, month := yearmon(date)]
+prices[, month := data.table::yearmon(date)]
 setorder(prices, symbol, date)
 prices[, day_of_month := 1:.N, by = .(symbol, month)]
 prices[, day_of_month := as.factor(day_of_month)]
@@ -121,48 +77,208 @@ prices = prices[symbol %in% symbols_keep]
 
 
 # SEASONALITY COARSE ------------------------------------------------------
-# Parameters
-target = "return_day3"
-first_date = as.Date("2001-01-01") # We nned to have 750 observations for every symbol
-
 # To decrease sample size I will exclude observations where winning rate is
 # lower than 60% for both long and short
-prices[, win_rate := runner(
-  x = get(target),
-  f = function(x) {
-    if (length(x) < 12*10) {
-      return(NA)
-    } else{
-      return(sum(x > 0) / length(x))
-    }
-  },
-  # k = nrow(.BY),
-  na_pad = TRUE
-  ),
-  by = .(symbol, day_of_month)]
-prices[, win_rate := frollapply(get(target), 12*10, function(x) sum(x > 0) / length(x)),
-       by = .(symbol, day_of_month)]
-round(nrow(prices[!is.na(win_rate)]) / nrow(prices), 3)
-round(nrow(prices[win_rate < 0.30 | win_rate > 0.7]) / nrow(prices) * 10, 3)
-prices[, keep := win_rate < 0.30 | win_rate > 0.7]
-prices[!is.na(win_rate)]
+targets = c("return_day", "return_day2", "return_day3", "return_week", "return_week2")
+cols_wr = paste0(targets, "_wr")
+prices[, (cols_wr) := lapply(targets, function(x) {
+  runner(
+    x = get(x),
+    f = function(x) {
+      if (length(x) < 12*10) {
+        return(NA)
+      } else{
+        y_ = sum(x > 0) / length(x)
+        if (y_ > 0.7 && mean(x) > 0 && median(x) > 0) {
+          return(1L)
+        } else if (y_ < 0.3 && mean(x) < 0 && median(x) < 0) {
+          return(-1L)
+        } else {
+          return(0L)
+        }
+      }
+    },
+    # k = nrow(.BY),
+    na_pad = TRUE
+  )
+}),
+by = .(symbol, day_of_month)]
+round(nrow(prices[!is.na(return_day_wr)]) / nrow(prices), 3) # same for all other targets
+round(nrow(prices[return_day_wr < 0.30 | return_day_wr > 0.7]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_day2_wr < 0.30 | return_day2_wr > 0.7]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_day3_wr < 0.30 | return_day3_wr > 0.7]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_week_wr < 0.30 | return_week_wr > 0.7]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_week2_wr < 0.30 | return_week2_wr > 0.7]) / nrow(prices) * 10, 3)
 
-# Backtest
-prices[, signal := NULL]
-prices[, signal := ifelse(shift(win_rate) > 0.7, 1, 0), by = .(symbol, day_of_month)]
-prices[signal == 0, signal := ifelse(shift(win_rate) < 0.3, -1, 0), by = .(symbol, day_of_month)]
-prices[signal == 1]
-prices[signal == -1]
-back = prices[signal %in% c(1, -1), .(date, signal, return_day3)]
+# TODO: Check if mead nad median returns are positive for rows where wr > 0.7 od < 0.3
+
+# Set signals
+cols_wr_signal = paste0(cols_wr, "_signal")
+prices[, (cols_wr_signal) := 0]
+prices[, (cols_wr_signal) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) > 0.7, 1, 0)
+}), by = .(symbol, day_of_month)]
+prices[return_day_wr_signal == 1]
+prices[return_week_wr_signal == 1]
+cols_wr_signal_short = paste0(cols_wr, "_signal_short")
+prices[, (cols_wr_signal_short) := 0]
+prices[, (cols_wr_signal_short) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) < 0.3, -1, 0)
+}), by = .(symbol, day_of_month)]
+prices[, return_day_wr_signal := ifelse(return_day_wr_signal == 0 & return_day_wr_signal_short == -1, -1, return_day_wr_signal)]
+prices[, return_day2_wr_signal := ifelse(return_day2_wr_signal == 0 & return_day2_wr_signal_short == -1, -1, return_day2_wr_signal)]
+prices[, return_day3_wr_signal := ifelse(return_day3_wr_signal == 0 & return_day3_wr_signal_short == -1, -1, return_day3_wr_signal)]
+prices[, return_week_wr_signal := ifelse(return_week_wr_signal == 0 & return_week_wr_signal_short == -1, -1, return_week_wr_signal)]
+prices[, return_week2_wr_signal := ifelse(return_week2_wr_signal == 0 & return_week2_wr_signal_short == -1, -1, return_week2_wr_signal)]
+prices[return_day_wr_signal == 1]
+prices[return_day_wr_signal == -1]
+prices[, (cols_wr_signal_short) := NULL]
+
+# Add to QC
+signal_ = "return_week_wr_signal"
+qc_data = prices[close_raw > 5 & x %in% c(1, -1), .(date, symbol, day_of_month, signal = x), env = list(x = signal_)]
+setorder(qc_data, date)
+qc_data = na.omit(qc_data)
+qc_data = qc_data[, .(
+  symbol = paste0(symbol, collapse = "|"),
+  signal = paste0(signal, collapse = "|")
+), by = date]
+qc_data[, date := as.character(date)]
+qc_data[, date := paste0(date, " 09:31:00")]
+blob_key = "0M4WRlV0/1b6b3ZpFKJvevg4xbC/gaNBcdtVZW+zOZcRi0ZLfOm1v/j2FZ4v+o8lycJLu1wVE6HT+ASt0DdAPQ=="
+endpoint = "https://snpmarketdata.blob.core.windows.net/"
+BLOBENDPOINT = storage_endpoint(endpoint, key=blob_key)
+cont = storage_container(BLOBENDPOINT, "qc-backtest")
+storage_write_csv(qc_data, cont, "seasonality_simple_week.csv")
+
+# Compare QC and local
+qc_data[ date %between% c("2023-01-01", "2023-01-03")]
+
+# Set signals for backtest
+setorder(prices, symbol, date)
+prices[shift(return_day_wr_signal) == 1, return_day_wr_signal := 1, by = symbol]
+prices[shift(return_day_wr_signal) == -1, return_day_wr_signal := -1, by = symbol]
+prices[shift(return_day2_wr_signal) == 1 | shift(return_day2_wr_signal, 2) == 1,
+       return_day2_wr_signal := 1, by = symbol]
+prices[shift(return_day2_wr_signal) == -1 | shift(return_day2_wr_signal, 2) == -1,
+       return_day2_wr_signal := -1, by = symbol]
+prices[shift(return_day3_wr_signal) == 1 | shift(return_day3_wr_signal, 2) == 1 | shift(return_day3_wr_signal, 3) == 1,
+       return_day3_wr_signal := 1, by = symbol]
+prices[shift(return_day3_wr_signal) == -1 | shift(return_day3_wr_signal, 2) == -1 | shift(return_day3_wr_signal, 3) == -1,
+       return_day3_wr_signal := -1, by = symbol]
+prices[shift(return_week_wr_signal) == 1 | shift(return_week_wr_signal, 2) == 1 |
+         shift(return_week_wr_signal, 3) == 1 | shift(return_week_wr_signal, 4) == 1 |
+         shift(return_week_wr_signal, 5) == 1,
+       return_week_wr_signal := 1, by = symbol]
+prices[shift(return_week_wr_signal) == -1 | shift(return_week_wr_signal, 2) == -1 |
+         shift(return_week_wr_signal, 3) == -1 | shift(return_week_wr_signal, 4) == -1 |
+         shift(return_week_wr_signal, 5) == -1,
+       return_week_wr_signal := -1, by = symbol]
+prices[shift(return_week2_wr_signal) == 1 | shift(return_week2_wr_signal, 2) == 1 |
+         shift(return_week2_wr_signal, 3) == 1 | shift(return_week2_wr_signal, 4) == 1 |
+         shift(return_week2_wr_signal, 5) == 1 | shift(return_week2_wr_signal, 6) == 1 |
+         shift(return_week2_wr_signal, 7) == 1 | shift(return_week2_wr_signal, 8) == 1 |
+         shift(return_week2_wr_signal, 9) == 1 | shift(return_week2_wr_signal, 10) == 1,
+       return_week2_wr_signal := 1, by = symbol]
+prices[shift(return_week2_wr_signal) == -1 | shift(return_week2_wr_signal, 2) == -1 |
+         shift(return_week2_wr_signal, 3) == -1 | shift(return_week2_wr_signal, 4) == -1 |
+         shift(return_week2_wr_signal, 5) == -1 | shift(return_week2_wr_signal, 6) == -1 |
+         shift(return_week2_wr_signal, 7) == -1 | shift(return_week2_wr_signal, 8) == -1 |
+         shift(return_week2_wr_signal, 9) == -1 | shift(return_week2_wr_signal, 10) == -1,
+       return_week2_wr_signal := -1, by = symbol]
+
+tail(prices[return_day_wr_signal == 1, .(symbol, date, return_day_wr_signal)], 10)
+tail(prices[return_day2_wr_signal == 1, .(symbol, date, return_day_wr_signal)], 20)
+tail(prices[return_day3_wr_signal == 1, .(symbol, date, return_day3_wr_signal)], 20)
+tail(prices[return_week_wr_signal == 1, .(symbol, date, return_week_wr_signal)], 20)
+
+# Backtests
+backtest = function(signal, performance = TRUE, cost = 0.0005) {
+  # signal = "return_week_wr_signal"
+  back = prices[close_raw > 1 &
+                  dollar_vol_rank < 2000 &
+                  x %in% c(1, -1), .(date, x, return_day),
+                env = list(x = signal)]
+  back[, weight := 1 / .N, by = date]
+  setorder(back, date)
+  back[, ret := x * return_day, env = list(x = signal)]
+  portfolio = back[, .(portfolio_ret = sum(ret  * weight) - cost), by = date]
+  portfolio = portfolio[portfolio_ret > -1]
+  portfolio = portfolio[date > as.Date("2007-01-01")]
+  if (performance) {
+    return(SharpeRatio.annualized(as.xts.data.table(portfolio))[1, ])
+  }
+  return(as.xts.data.table(portfolio))
+}
+back_day   = backtest("return_day_wr_signal")
+back_day2  = backtest("return_day2_wr_signal")
+back_day3  = backtest("return_day3_wr_signal")
+back_week  = backtest("return_week_wr_signal")
+back_week2 = backtest("return_week2_wr_signal")
+data.table(
+  back_day = back_day,
+  back_day2 = back_day2,
+  back_day3 = back_day3,
+  back_week = back_week,
+  back_week2 = back_week2
+)
+charts.PerformanceSummary(backtest("return_week_wr_signal", FALSE))
+charts.PerformanceSummary(backtest("return_week_wr_signal", FALSE)["2023"])
+
+# Compare QC and local
+qc_data[date %between% c(as.Date("2023-01-01"), as.Date("2023-01-03"))]
+cols_wr_signal = paste0(cols_wr, "_signal")
+prices[, (cols_wr_signal) := 0]
+prices[, (cols_wr_signal) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) > 0.7, 1, 0)
+}), by = .(symbol, day_of_month)]
+prices[return_day_wr_signal == 1]
+prices[return_week_wr_signal == 1]
+cols_wr_signal_short = paste0(cols_wr, "_signal_short")
+prices[, (cols_wr_signal_short) := 0]
+prices[, (cols_wr_signal_short) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) < 0.3, -1, 0)
+}), by = .(symbol, day_of_month)]
+prices[, return_day_wr_signal := ifelse(return_day_wr_signal == 0 & return_day_wr_signal_short == -1, -1, return_day_wr_signal)]
+prices[, return_day2_wr_signal := ifelse(return_day2_wr_signal == 0 & return_day2_wr_signal_short == -1, -1, return_day2_wr_signal)]
+prices[, return_day3_wr_signal := ifelse(return_day3_wr_signal == 0 & return_day3_wr_signal_short == -1, -1, return_day3_wr_signal)]
+prices[, return_week_wr_signal := ifelse(return_week_wr_signal == 0 & return_week_wr_signal_short == -1, -1, return_week_wr_signal)]
+prices[, return_week2_wr_signal := ifelse(return_week2_wr_signal == 0 & return_week2_wr_signal_short == -1, -1, return_week2_wr_signal)]
+prices[return_day_wr_signal == 1]
+prices[return_day_wr_signal == -1]
+prices[, (cols_wr_signal_short) := NULL]
+signal_ = "return_week_wr_signal"
+back = prices[x %in% c(1, -1), .(date, symbol, x, return_day),
+              env = list(x = signal_)]
 back[, weight := 1 / .N, by = date]
 setorder(back, date)
-back[, ret := signal * return_day3]
-portfolio = back[, .(portfolio_ret = sum(ret * weight)), by = date]
-charts.PerformanceSummary(as.xts.data.table(portfolio))
-Return.cumulative(as.xts.data.table(portfolio))
+back[date > as.Date("2023-01-01") & date < as.Date("2023-01-04")]
 
 
 # SEASONALITY MINING ------------------------------------------------------
+# Recalculate winning rates
+cols_wr_signal = paste0(cols_wr, "_signal")
+prices[, (cols_wr_signal) := 0]
+prices[, (cols_wr_signal) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) > 0.7, 1, 0)
+}), by = .(symbol, day_of_month)]
+prices[return_day_wr_signal == 1]
+prices[return_week_wr_signal == 1]
+cols_wr_signal_short = paste0(cols_wr, "_signal_short")
+prices[, (cols_wr_signal_short) := 0]
+prices[, (cols_wr_signal_short) := lapply(cols_wr, function(x) {
+  fifelse(shift(get(x)) < 0.3, -1, 0)
+}), by = .(symbol, day_of_month)]
+prices[, return_day_wr_signal := ifelse(return_day_wr_signal == 0 & return_day_wr_signal_short == -1, -1, return_day_wr_signal)]
+prices[, return_day2_wr_signal := ifelse(return_day2_wr_signal == 0 & return_day2_wr_signal_short == -1, -1, return_day2_wr_signal)]
+prices[, return_day3_wr_signal := ifelse(return_day3_wr_signal == 0 & return_day3_wr_signal_short == -1, -1, return_day3_wr_signal)]
+prices[, return_week_wr_signal := ifelse(return_week_wr_signal == 0 & return_week_wr_signal_short == -1, -1, return_week_wr_signal)]
+prices[, return_week2_wr_signal := ifelse(return_week2_wr_signal == 0 & return_week2_wr_signal_short == -1, -1, return_week2_wr_signal)]
+prices[return_day_wr_signal == 1]
+prices[return_day_wr_signal == -1]
+prices[, (cols_wr_signal_short) := NULL]
+setorder(prices, symbol, date)
+
 # Get coeffs from summary of quantile regression
 get_coeffs = function(df, y = "return_week") {
   res = rq(as.formula(paste0(y, " ~ day_of_month")), data = as.data.frame(df))
@@ -170,11 +286,12 @@ get_coeffs = function(df, y = "return_week") {
   as.data.table(summary_fit$coefficients, keep.rownames = TRUE)
 }
 
-# Calculate median regression where day_returns is not NA
-ind = dt[date > first_date & keep == TRUE, .I[.N], by = .(symbol, yearmonthid)]
-ind = ind[, V1]
+# I we ignore above and choose best from above analysis
+ind = prices[, which(!is.na(return_week_wr_signal) & return_week_wr_signal != 0)]
+length(ind)
+prices[ind][date %between% c(as.Date("2023-01-01"), as.Date("2023-01-03"))]
 res = runner(
-  x = dt,
+  x = prices,
   f = function(x) {
     x = x[symbol == x[, last(symbol)]]
     if (nrow(x) < (22*12)) return(NA)
@@ -183,214 +300,84 @@ res = runner(
     return(res_)
   },
   lag = 0L,
-  k = 100000,
+  k = as.integer((Sys.Date() - as.Date("1998-01-01"))) + 1,
   at = ind, # ind_sample for p
   na_pad = TRUE
 )
 
 # Inspect
+length(ind)
 length(res)
+sum(!is.na(res))
+sum(!is.na(res)) / length(res)
 head(res)
 tail(res)
 
 # Merge results and dt table
-dt_results = copy(dt)
-dt_results[, rq_res := list(as.list(NA))]
-dt_results[ind, rq_res := res]
-dt_results = dt_results[ind & !is.na(rq_res)]
-dt_results = dt_results[, .(symbol, date, yearmonthid, rq_res)]
+results = copy(prices)
+results
+results[, rq_res := list(as.list(NA))]
+results[ind, rq_res := res]
+head(results)
+tail(results)
+cols_keep = c("symbol", "date", "month", "day_of_month", "rq_res",
+              "dollar_vol_rank", "close_raw", "return_week_wr_signal")
+results = results[!is.na(rq_res), ..cols_keep]
 
 # Unnest results
-dt_results = dt_results[, rbindlist(rq_res), by = .(symbol, yearmonthid, date)]
+results = results[, rbindlist(rq_res), by = setdiff(cols_keep, "rq_res")]
+
+# Inspect
+results[date %between% c(as.Date("2023-01-01"), as.Date("2023-01-03"))]
+prices[ind][date %between% c(as.Date("2023-01-01"), as.Date("2023-01-03"))]
+results[symbol == "aar"]
 
 # fwrite
-fwrite(dt_results, glue("F:/strategies/seasonality/seasonality_{target}.csv"))
+fwrite(results, "F:/strategies/seasonality/seasonality_return_week.csv")
 
 
+# WR + REG ----------------------------------------------------------------
+# Keep only rows where rn is equal to day_of_month
+results[rn == "(Intercept)", rnn := 1]
+results[is.na(rnn), rnn := stringr::str_extract(rn, "[0-9]+")]
+results[, rnn := as.integer(rnn)]
+results = results[as.integer(day_of_month) == rnn]
 
-# ARCHIVE -----------------------------------------------------------------
-# # define all year-months and start year
-# yearmonthids = dt[, sort(unique(yearmonthid))]
-# end_dates = seq.Date(as.Date("2018-01-01"), dt[, max(date)], by = "month")
-# end_dates = as.IDate(end_dates)
-#
-# # Remove symbols inactive before first date. This can  produce survivorship bias,
-# # but we will be faster. If this doesn't work, it want work with all data fro sure.
-# symbols_keep = dt[, (end_dates[1] - max(date)) < 7, by = symbol] # we must have at least 7 days of data
-# dt = dt[symbol %in% symbols_keep[V1 == TRUE, symbol]]
-#
-# # Sample data - this is just for test
-# dt_sample = dt[symbol %in% dt[, sample(unique(symbol), 10)]]
-#
-# # get median regression coefficients - experiment
-# sample_size_days = 2520
-# seasonality_results = dt[, lapply(end_dates, function(date_) {
-#   if ((date_ - max(date)) > 7) return(list(NA))
-#   # print(date_ - sample_size_days)
-#   # get_coeffs(.SD[yearmonthid %between% c(yearmon(y - sample_size_days), yearmon(y))])
-#   tryCatch(list(get_coeffs(.SD[yearmonthid %between% c(yearmon(date_ - sample_size_days), yearmon(date_))])),
-#            error = function(e) list(NA))
-# }), by = symbol]
-# cols = paste0("month", strftime(end_dates, format = "%y%m%d"))
-# colnames(seasonality_results)[2:length(colnames(seasonality_results))] = cols
-#
-# # save
-# time = strftime(Sys.time(), "%Y%m%d%H%M%S")
-# saveRDS(seasonality_results, file.path("D:/features", paste0("seasonality-week", time, ".rds")))
-#
-# # Import data
-#
-#
-# # INSPECT RESULTS ---------------------------------------------------------
-# # seasonality_results[1, month190101]
-#
-#
-# # CREATE PORTFOLIOS -------------------------------------------------------
-# # Portfolio 1 - keep min Pr for every symbol
-# portfolios_l = list()
-# for (i in seq_along(cols)) {
-#
-#   # sample
-#   col = cols[i]
-#   cols_ = c("symbol", col)
-#   x = seasonality_results[, ..cols_]
-#
-#   # remove missing values
-#   x[, number_of_rows := vapply(get(col), function(y) length(y), FUN.VALUE = integer(1L))]
-#   x = x[number_of_rows > 1]
-#
-#   # unnest
-#   x = x[, rbindlist(get(col)), by = symbol]
-#
-#   # remove intercept
-#   x = x[rn != "(Intercept)"]
-#
-#   # keep min Pr for every symbol
-#   x[, minp := min(`Pr(>|t|)`) == `Pr(>|t|)`, by = symbol]
-#
-#   # keep lowet p for every stock
-#   x_min = x[minp == TRUE]
-#
-#   # filter symbols to trade
-#   setorder(x_min, "Pr(>|t|)")
-#   portfolios_l[[i]] = cbind(date = col, head(x_min, 10))
-# }
-# portfolio1 = rbindlist(portfolios_l)
-#
-# # create portfolio function v2
-# portfolios_l = list()
-# for (i in seq_along(cols)) {
-#
-#   # sample
-#   col = cols[i]
-#   cols_ = c("symbol", col)
-#   x = seasonality_results[, ..cols_]
-#
-#   # remove missing values
-#   x[, number_of_rows := vapply(get(col), function(y) length(y), FUN.VALUE = integer(1L))]
-#   x = x[number_of_rows > 1]
-#
-#   # unnest
-#   x = x[, rbindlist(get(col)), by = symbol]
-#
-#   # remove intercept
-#   x = x[rn != "(Intercept)"]
-#
-#   # filter longs
-#   x = x[Value > 0]
-#
-#   #
-#   x[, minp := min(`Pr(>|t|)`) == `Pr(>|t|)`, by = symbol]
-#
-#   # keep lowet p for every stock
-#   x_min = x[minp == TRUE]
-#
-#   # filter symbols to trade
-#   setorder(x_min, "Pr(>|t|)")
-#   portfolios_l[[i]] = cbind(date = col, head(x_min, 10))
-# }
-# portfolio2 = rbindlist(portfolios_l)
-#
-#
-# # create portfolio function v3
-# portfolios_l = list()
-# for (i in seq_along(cols)) {
-#
-#   # sample
-#   col = cols[i]
-#   cols_ = c("symbol", col)
-#   x = seasonality_results[, ..cols_]
-#
-#   # remove missing values
-#   x[, number_of_rows := vapply(get(col), function(y) length(y), FUN.VALUE = integer(1L))]
-#   x = x[number_of_rows > 1]
-#
-#   # unnest
-#   x = x[, rbindlist(get(col)), by = symbol]
-#
-#   # remove intercept
-#   x = x[rn != "(Intercept)"]
-#
-#   # filter longs
-#   x = x[Value > 0]
-#
-#   #
-#   x[, rnn := as.integer(gsub("day_of_month", "", rn))]
-#   setorder(x, symbol, rnn)
-#   x[, pr_roll := frollapply(`Pr(>|t|)`, 4, function(x) all(x < 0.01)), by = symbol]
-#   x = na.omit(x)
-#   x = x[pr_roll == 1]
-#
-#   # filter symbols to trade
-#   x = x[, (rn = head(rn, 1)), by = symbol]
-#   portfolios_l[[i]] = cbind(date = col, x)
-# }
-# portfolio3 = rbindlist(portfolios_l)
-# setnames(portfolio3, "V1", "rn")
-# portfolio3[, Value := 1]
-#
-# # clean portfolios
-# portfolio_prepare = function(portfolio) {
-#   # portfolio = copy(portfolio1)
-#
-#   # set trading dates
-#   # portfolio[, date := as.Date(gsub("month", "", date), format = "%y%m%d")]
-#   portfolio[, rn := gsub("day_of_month", "", rn)]
-#
-#   # get trading days
-#   date_ = portfolio[, as.Date(paste0(gsub("month", "", date), "01"), format = "%y%m%d")]
-#   seq_ = 1:nrow(portfolio)
-#   seq_dates = lapply(date_, function(x) getBusinessDays(x, x %m+% months(1) - 1))
-#   dates = mapply(function(x, y) x[y], x = seq_dates, y = portfolio[, as.integer(rn)])
-#   portfolio[, dates_trading := as.Date(dates, origin = "1970-01-01")]
-#   portfolio
-# }
-# portfolio1 = portfolio_prepare(portfolio1)
-# portfolio2 = portfolio_prepare(portfolio2)
-# portfolio3 = portfolio_prepare(portfolio3)
-#
-# # save to Azure for backtesting
-# save_qc = function(portfolio, file_name) {
-#   portfoliosqc = portfolio[, .(dates_trading, symbol, rn, Value)]
-#   setorder(portfoliosqc, dates_trading)
-#   portfoliosqc = na.omit(portfoliosqc)
-#   setnames(portfoliosqc, "dates_trading", "date")
-#   portfoliosqc = portfoliosqc[, .(symbol = paste0(symbol, collapse = "|"),
-#                                   rn     = paste0(rn, collapse = "|"),
-#                                   value  = paste0(Value, collapse = "|")),
-#                               by = date]
-#   portfoliosqc[, date := as.character(date)]
-#   portfoliosqc = na.omit(portfoliosqc)
-#   blob_key = "0M4WRlV0/1b6b3ZpFKJvevg4xbC/gaNBcdtVZW+zOZcRi0ZLfOm1v/j2FZ4v+o8lycJLu1wVE6HT+ASt0DdAPQ=="
-#   endpoint = "https://snpmarketdata.blob.core.windows.net/"
-#   BLOBENDPOINT = storage_endpoint(endpoint, key=blob_key)
-#   cont = storage_container(BLOBENDPOINT, "qc-backtest")
-#   storage_write_csv(portfoliosqc, cont, file_name)
-# }
-# save_qc(portfolio1, "seasons-portfolio1.csv")
-# save_qc(portfolio2, "seasons-portfolio2.csv")
-# save_qc(portfolio3, "seasons-portfolio3.csv")
-#
-# # test
-# dt[symbol == "aac"]
-# dt[symbol == "aac" & date %between% c("2019-10-01", "2020-01-10")]
+# Set signals
+signals = results[sign(Value) == return_week_wr_signal]
+setnames(signals, "Pr(>|t|)", "p")
+signals = signals[p < 0.01]
+
+# Merge prices and signals
+prices = signals[, .(symbol, date, signal_reg = return_week_wr_signal)][
+  prices, on = c("symbol", "date")]
+
+# Set signals for backtest
+setorder(prices, symbol, date)
+prices[shift(signal_reg) == 1 | shift(signal_reg, 2) == 1 |
+         shift(signal_reg, 3) == 1 | shift(signal_reg, 4) == 1,
+       signal_reg := 1, by = symbol]
+prices[shift(signal_reg) == -1 | shift(signal_reg, 2) == -1 |
+         shift(signal_reg, 3) == -1 | shift(signal_reg, 4) == -1,
+       signal_reg := -1, by = symbol]
+tail(prices[signal_reg == 1, .(symbol, date, signal_reg)], 20)
+
+# Backtest
+# close_raw > 1 &
+#   dollar_vol_rank < 2000 &
+# back = prices[signal_reg %in% c(1, -1), .(date, signal_reg, return_day)]
+back = prices[dollar_vol_rank < 2000 & signal_reg %in% c(1, -1), .(date, signal_reg, return_day)]
+back[, weight := 1 / .N, by = date]
+setorder(back, date)
+back[, ret := signal_reg * return_day]
+portfolio = back[, .(portfolio_ret = sum(ret * weight) - 0.0005), by = date]
+portfolio = portfolio[portfolio_ret > -1]
+portfolio = portfolio[date > as.Date("2007-01-01")]
+portfolio = as.xts.data.table(portfolio)
+SharpeRatio.annualized(portfolio)[1, ]
+charts.PerformanceSummary(portfolio)
+
+
+# REG ---------------------------------------------------------------------
+
+
