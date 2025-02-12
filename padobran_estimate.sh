@@ -2,7 +2,7 @@
 
 #PBS -N Season
 #PBS -l ncpus=1
-#PBS -l mem=4GB
+#PBS -l mem=2GB
 #PBS -J 1-17058
 #PBS -o logs
 #PBS -j oe

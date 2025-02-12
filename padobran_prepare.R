@@ -56,7 +56,7 @@ cont = sprintf(
 
 #PBS -N Season
 #PBS -l ncpus=1
-#PBS -l mem=4GB
+#PBS -l mem=2GB
 #PBS -J 1-%d
 #PBS -o logs
 #PBS -j oe
@@ -68,4 +68,4 @@ apptainer run image_season.sif padobran_estimate.R",
 writeLines(cont, "padobran_estimate.sh")
 
 # Add to padobran
-# scp -r /home/sn/data/strategies/pead/prices padobran:/home/jmaric/peadml/prices
+# scp -r D:/strategies/season/prices padobran:/home/jmaric/seasonality/prices
