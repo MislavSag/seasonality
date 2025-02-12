@@ -1,0 +1,16 @@
+Bootstrap: docker
+From: r-base:4.4.0
+
+%post
+
+  # apt
+  apt update
+  apt install -y libssl-dev libxml2-dev libcurl4-openssl-dev build-essential g++ cmake
+
+  # mlr3
+  R --slave -e 'install.packages("data.table")'
+  R --slave -e 'install.packages("runner")'
+  R --slave -e 'install.packages("quantreg")'
+
+%runscript
+  Rscript $@

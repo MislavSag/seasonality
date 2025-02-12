@@ -18,7 +18,7 @@ rq_dt = fread("F:/strategies/seasonality/seasonality_return_week.csv")
 # 1) p has to be lower than 0.02
 # 2) keep min Pr for every symbol
 # 3) keep top x for every month
-portfolio1 = rq_dt[`Pr(>|t|)` < 0.02]
+portfolio1 = rq_dt[dollar_vol_rank < 2000][`Pr(>|t|)` < 0.02]
 portfolio1 = portfolio1[rn != "(Intercept)"]
 if  ("yearmonthid" %in% colnames(portfolio1)) {
   setnames(portfolio1, "yearmonthid", "month")
@@ -26,7 +26,7 @@ if  ("yearmonthid" %in% colnames(portfolio1)) {
 portfolio1[, minp := min(`Pr(>|t|)`) == `Pr(>|t|)`, by = .(month, symbol)]
 portfolio1 = portfolio1[minp == TRUE]
 setorderv(portfolio1, c("month", "Pr(>|t|)"))
-portfolio1 = portfolio1[, head(.SD, 5), by = month]
+portfolio1 = portfolio1[, head(.SD, 10), by = month]
 # portfolio1 = portfolio1[, head(.SD, 50), by = month]
 portfolio1 = unique(portfolio1, by = c("month", "symbol")) # remove duplicated symbols in month
 # TODO: move this code above
@@ -35,7 +35,7 @@ portfolio1[round(month, 2) == 2024.83]
 # Portfolio 2:
 # 1) p has to be greater than 0.02
 # 2)
-portfolio2 = rq_dt[`Pr(>|t|)` < 0.02]
+portfolio2 = rq_dt[dollar_vol_rank < 2000][`Pr(>|t|)` < 0.02]
 portfolio2 = portfolio2[rn != "(Intercept)"]
 portfolio2[, rnn := gsub("day_of_month", "", rn)]
 setorder(portfolio2, symbol, rnn, date)
@@ -47,6 +47,19 @@ if  ("yearmonthid" %in% colnames(portfolio2)) {
 }
 portfolio2 = unique(portfolio2, by = c("month", "symbol")) # remove duplicated symbols in month
 portfolio2[month == 2024.5]
+
+# Portfolio 3
+# 1) every day buy top 1 symbol
+portfolio3 = rq_dt[`Pr(>|t|)` < 0.05]
+portfolio3 = portfolio1[rn != "(Intercept)"]
+if  ("yearmonthid" %in% colnames(portfolio1)) {
+  setnames(portfolio3, "yearmonthid", "month")
+}
+portfolio3[, minp := min(`Pr(>|t|)`) == `Pr(>|t|)`, by = .(month, day_of_month)]
+portfolio3 = portfolio3[minp == TRUE]
+setorderv(portfolio3, c("month", "day_of_month"))
+portfolio3[, unique(symbol)]
+portfolio3[round(month, 2) == 2024.83]
 
 # Clean portfolios
 portfolio_prepare = function(portfolio) {
@@ -65,6 +78,7 @@ portfolio_prepare = function(portfolio) {
 }
 portfolio1 = portfolio_prepare(portfolio1)
 portfolio2 = portfolio_prepare(portfolio2)
+portfolio3 = portfolio_prepare(portfolio3)
 
 # save to Azure for backtesting
 save_qc = function(portfolio, file_name) {
@@ -90,7 +104,7 @@ save_qc(portfolio2, "seasons-portfolio2.csv")
 
 # BACKTET LOCALLY ---------------------------------------------------------
 # Choose portfolio
-portfolio_ = copy(portfolio1)
+portfolio_ = copy(portfolio2)
 
 # Merge price data to
 ohlcv = finutils::qc_daily(
@@ -133,11 +147,11 @@ back = back[signal %in% c(1, -1), .(date, signal, returns)]
 back[, weight := 1 / .N, by = date]
 setorder(back, date)
 back[, ret := signal * returns]
-portfolio = back[, .(portfolio_ret = sum(ret * weight)), by = date]
+portfolio = back[, .(portfolio_ret = sum((ret- 0.001) * weight)), by = date]
 setorder(portfolio, date)
-portfolio[, portfolio_ret := portfolio_ret - 0.0001]
+portfolio[, portfolio_ret := portfolio_ret]
 charts.PerformanceSummary(as.xts.data.table(portfolio))
-charts.PerformanceSummary(as.xts.data.table(portfolio)["2020-01-01/2024-01-01"])
+# charts.PerformanceSummary(as.xts.data.table(portfolio)["2020-01-01/2024-01-01"])
 Return.cumulative(as.xts.data.table(portfolio))
 Return.cumulative(as.xts.data.table(portfolio)["2020-01-01/"])
 
@@ -148,16 +162,6 @@ back[sort(c(indecies_short, outer(indecies_short, 1:3, FUN = "+")))] |>
   _[symbol == "phk"] |>
   _[date > as.Date("2020-01-01")]
 portfolio1[symbol == "phk"][date > as.Date("2019-12-01")]
-
-
-
-ohlcv = finutils::qc_daily(
-  file_path = "F:/lean/data/stocks_daily.csv",
-  symbols = portfolio_[, unique(symbol)],
-  min_obs = 252*3,
-  price_threshold = 0.00001
-)
-
 
 
 file_path = "F:/lean/data/stocks_daily.csv"

@@ -103,39 +103,37 @@ prices[, (cols_wr) := lapply(targets, function(x) {
   )
 }),
 by = .(symbol, day_of_month)]
-round(nrow(prices[!is.na(return_day_wr)]) / nrow(prices), 3) # same for all other targets
-round(nrow(prices[return_day_wr < 0.30 | return_day_wr > 0.7]) / nrow(prices) * 10, 3)
-round(nrow(prices[return_day2_wr < 0.30 | return_day2_wr > 0.7]) / nrow(prices) * 10, 3)
-round(nrow(prices[return_day3_wr < 0.30 | return_day3_wr > 0.7]) / nrow(prices) * 10, 3)
-round(nrow(prices[return_week_wr < 0.30 | return_week_wr > 0.7]) / nrow(prices) * 10, 3)
-round(nrow(prices[return_week2_wr < 0.30 | return_week2_wr > 0.7]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_day_wr %in% c(-1L, 1L)]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_day2_wr %in% c(-1L, 1L)]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_day3_wr %in% c(-1L, 1L)]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_week_wr %in% c(-1L, 1L)]) / nrow(prices) * 10, 3)
+round(nrow(prices[return_week2_wr %in% c(-1L, 1L)]) / nrow(prices) * 10, 3)
 
-# TODO: Check if mead nad median returns are positive for rows where wr > 0.7 od < 0.3
-
-# Set signals
+# Recalculate winning rates
 cols_wr_signal = paste0(cols_wr, "_signal")
 prices[, (cols_wr_signal) := 0]
 prices[, (cols_wr_signal) := lapply(cols_wr, function(x) {
-  fifelse(shift(get(x)) > 0.7, 1, 0)
+  fifelse(shift(get(x)) == 1, 1, 0)
 }), by = .(symbol, day_of_month)]
 prices[return_day_wr_signal == 1]
-prices[return_week_wr_signal == 1]
+prices[return_week_wr_signal == 1]; prices[return_week_wr == 1]
 cols_wr_signal_short = paste0(cols_wr, "_signal_short")
 prices[, (cols_wr_signal_short) := 0]
 prices[, (cols_wr_signal_short) := lapply(cols_wr, function(x) {
-  fifelse(shift(get(x)) < 0.3, -1, 0)
+  fifelse(shift(get(x)) == -1, -1, 0)
 }), by = .(symbol, day_of_month)]
 prices[, return_day_wr_signal := ifelse(return_day_wr_signal == 0 & return_day_wr_signal_short == -1, -1, return_day_wr_signal)]
 prices[, return_day2_wr_signal := ifelse(return_day2_wr_signal == 0 & return_day2_wr_signal_short == -1, -1, return_day2_wr_signal)]
 prices[, return_day3_wr_signal := ifelse(return_day3_wr_signal == 0 & return_day3_wr_signal_short == -1, -1, return_day3_wr_signal)]
 prices[, return_week_wr_signal := ifelse(return_week_wr_signal == 0 & return_week_wr_signal_short == -1, -1, return_week_wr_signal)]
 prices[, return_week2_wr_signal := ifelse(return_week2_wr_signal == 0 & return_week2_wr_signal_short == -1, -1, return_week2_wr_signal)]
-prices[return_day_wr_signal == 1]
-prices[return_day_wr_signal == -1]
+prices[return_day_wr_signal == 1]; prices[return_day_wr == 1]
+prices[return_day_wr_signal == -1]; prices[return_day_wr == -1]
 prices[, (cols_wr_signal_short) := NULL]
+setorder(prices, symbol, date)
 
 # Add to QC
-signal_ = "return_week_wr_signal"
+signal_ = "return_day2_wr"
 qc_data = prices[close_raw > 5 & x %in% c(1, -1), .(date, symbol, day_of_month, signal = x), env = list(x = signal_)]
 setorder(qc_data, date)
 qc_data = na.omit(qc_data)
@@ -156,7 +154,7 @@ qc_data[ date %between% c("2023-01-01", "2023-01-03")]
 
 # Set signals for backtest
 setorder(prices, symbol, date)
-prices[shift(return_day_wr_signal) == 1, return_day_wr_signal := 1, by = symbol]
+prices[shift(return_day_wr_signal) == 1, return_day_signal := 1, by = symbol]
 prices[shift(return_day_wr_signal) == -1, return_day_wr_signal := -1, by = symbol]
 prices[shift(return_day2_wr_signal) == 1 | shift(return_day2_wr_signal, 2) == 1,
        return_day2_wr_signal := 1, by = symbol]
@@ -186,14 +184,13 @@ prices[shift(return_week2_wr_signal) == -1 | shift(return_week2_wr_signal, 2) ==
          shift(return_week2_wr_signal, 7) == -1 | shift(return_week2_wr_signal, 8) == -1 |
          shift(return_week2_wr_signal, 9) == -1 | shift(return_week2_wr_signal, 10) == -1,
        return_week2_wr_signal := -1, by = symbol]
-
 tail(prices[return_day_wr_signal == 1, .(symbol, date, return_day_wr_signal)], 10)
 tail(prices[return_day2_wr_signal == 1, .(symbol, date, return_day_wr_signal)], 20)
 tail(prices[return_day3_wr_signal == 1, .(symbol, date, return_day3_wr_signal)], 20)
 tail(prices[return_week_wr_signal == 1, .(symbol, date, return_week_wr_signal)], 20)
 
 # Backtests
-backtest = function(signal, performance = TRUE, cost = 0.0005) {
+backtest = function(signal, performance = TRUE, cost = 0.001) {
   # signal = "return_week_wr_signal"
   back = prices[close_raw > 1 &
                   dollar_vol_rank < 2000 &
@@ -223,6 +220,7 @@ data.table(
   back_week2 = back_week2
 )
 charts.PerformanceSummary(backtest("return_week_wr_signal", FALSE))
+charts.PerformanceSummary(backtest("return_day2_wr_signal", FALSE))
 charts.PerformanceSummary(backtest("return_week_wr_signal", FALSE)["2023"])
 
 # Compare QC and local
@@ -260,22 +258,22 @@ back[date > as.Date("2023-01-01") & date < as.Date("2023-01-04")]
 cols_wr_signal = paste0(cols_wr, "_signal")
 prices[, (cols_wr_signal) := 0]
 prices[, (cols_wr_signal) := lapply(cols_wr, function(x) {
-  fifelse(shift(get(x)) > 0.7, 1, 0)
+  fifelse(shift(get(x)) == 1, 1, 0)
 }), by = .(symbol, day_of_month)]
 prices[return_day_wr_signal == 1]
-prices[return_week_wr_signal == 1]
+prices[return_week_wr_signal == 1]; prices[return_week_wr == 1]
 cols_wr_signal_short = paste0(cols_wr, "_signal_short")
 prices[, (cols_wr_signal_short) := 0]
 prices[, (cols_wr_signal_short) := lapply(cols_wr, function(x) {
-  fifelse(shift(get(x)) < 0.3, -1, 0)
+  fifelse(shift(get(x)) == -1, -1, 0)
 }), by = .(symbol, day_of_month)]
 prices[, return_day_wr_signal := ifelse(return_day_wr_signal == 0 & return_day_wr_signal_short == -1, -1, return_day_wr_signal)]
 prices[, return_day2_wr_signal := ifelse(return_day2_wr_signal == 0 & return_day2_wr_signal_short == -1, -1, return_day2_wr_signal)]
 prices[, return_day3_wr_signal := ifelse(return_day3_wr_signal == 0 & return_day3_wr_signal_short == -1, -1, return_day3_wr_signal)]
 prices[, return_week_wr_signal := ifelse(return_week_wr_signal == 0 & return_week_wr_signal_short == -1, -1, return_week_wr_signal)]
 prices[, return_week2_wr_signal := ifelse(return_week2_wr_signal == 0 & return_week2_wr_signal_short == -1, -1, return_week2_wr_signal)]
-prices[return_day_wr_signal == 1]
-prices[return_day_wr_signal == -1]
+prices[return_day_wr_signal == 1]; prices[return_day_wr == 1]
+prices[return_day_wr_signal == -1]; prices[return_day_wr == -1]
 prices[, (cols_wr_signal_short) := NULL]
 setorder(prices, symbol, date)
 
@@ -341,12 +339,12 @@ fwrite(results, "F:/strategies/seasonality/seasonality_return_week.csv")
 results[rn == "(Intercept)", rnn := 1]
 results[is.na(rnn), rnn := stringr::str_extract(rn, "[0-9]+")]
 results[, rnn := as.integer(rnn)]
-results = results[as.integer(day_of_month) == rnn]
 
 # Set signals
-signals = results[sign(Value) == return_week_wr_signal]
+signals = results[as.integer(day_of_month) == rnn]
+signals = signals[sign(Value) == return_week_wr_signal]
 setnames(signals, "Pr(>|t|)", "p")
-signals = signals[p < 0.01]
+signals = signals[p < 0.001]
 
 # Merge prices and signals
 prices = signals[, .(symbol, date, signal_reg = return_week_wr_signal)][
@@ -361,6 +359,7 @@ prices[shift(signal_reg) == -1 | shift(signal_reg, 2) == -1 |
          shift(signal_reg, 3) == -1 | shift(signal_reg, 4) == -1,
        signal_reg := -1, by = symbol]
 tail(prices[signal_reg == 1, .(symbol, date, signal_reg)], 20)
+tail(prices[signal_reg == -1, .(symbol, date, signal_reg)], 20)
 
 # Backtest
 # close_raw > 1 &
