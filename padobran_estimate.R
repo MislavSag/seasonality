@@ -31,6 +31,13 @@ if (interactive()) {
 # Prepare data for median regression
 prices[, day_of_month := as.factor(day_of_month)]
 
+# Create future returns
+prices[, lead_1 := shift(close, 1, type = "lead") / close - 1, by = symbol]
+prices[, lead_2 := shift(close, 2, type = "lead") / shift(close, 1, type = "lead") - 1, by = symbol]
+prices[, lead_3 := shift(close, 3, type = "lead") / shift(close, 2, type = "lead") - 1, by = symbol]
+prices[, lead_4 := shift(close, 3, type = "lead") / shift(close, 2, type = "lead") - 1, by = symbol]
+prices[, lead_5 := shift(close, 3, type = "lead") / shift(close, 2, type = "lead") - 1, by = symbol]
+
 # Function to calcualte median regression
 get_coeffs = function(df, y = "return_week") {
   # df = prices[1:300]
@@ -51,6 +58,13 @@ get_coeffs = function(df, y = "return_week") {
   } else {
     res = cbind(date = data.table::last(df[, date]),
                 symbol = data.table::last(df[, symbol]),
+                day_of_month = data.table::last(df[, day_of_month]),
+                target = data.table::last(df[, get(y)]),
+                lead_1 = data.table::last(df[, lead_1]),
+                lead_2 = data.table::last(df[, lead_2]),
+                lead_3 = data.table::last(df[, lead_3]),
+                lead_4 = data.table::last(df[, lead_4]),
+                lead_5 = data.table::last(df[, lead_5]),
                 res)
     return(res)
   }
@@ -58,7 +72,7 @@ get_coeffs = function(df, y = "return_week") {
 
 # Calculate median regression by day_of_month
 res = runner(
-  x = prices,
+  x = prices[1:300],
   f = function(x) {
     if (nrow(x) < (252)) return(NULL)
     tryCatch(get_coeffs(x), error = function(e) NULL)

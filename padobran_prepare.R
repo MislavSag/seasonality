@@ -25,7 +25,10 @@ prices[, return_week2 := shift(close, 10, type = "lead") / close - 1, by = symbo
 # define frequency unit
 prices[, month := data.table::yearmon(date)]
 setorder(prices, symbol, date)
-prices[, day_of_month := 1:.N, by = .(symbol, month)]
+month_date = unique(prices[, .(month, date)])
+setorder(month_date, date)
+month_date[, day_of_month := 1:.N, by = .(month)]
+prices = month_date[, .(date, day_of_month)][prices, on = c("date")]
 prices[, day_of_month := as.factor(day_of_month)]
 
 # Remove missing values and select columns we need
@@ -38,7 +41,8 @@ prices[day_of_month == 22, day_of_month := 21] # not sure about this but lets fo
 
 # Save every symbol separately
 prices_dir = file.path(PATH_DATASET, "prices")
-if (!dir.exists(prices_dir)) {
+if (dir.exists(prices_dir)) {
+  fs::dir_delete(prices_dir)
   dir.create(prices_dir)
 }
 for (s in prices[, unique(symbol)]) {
@@ -56,7 +60,7 @@ cont = sprintf(
 
 #PBS -N Season
 #PBS -l ncpus=1
-#PBS -l mem=2GB
+#PBS -l mem=1GB
 #PBS -J 1-%d
 #PBS -o logs
 #PBS -j oe
